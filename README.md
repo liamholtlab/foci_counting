@@ -15,3 +15,5 @@
 
 `conda activate foci_counting`  
 `python foci_counting.py`
+
+![Screenshot_foci_counting.png](Screenshot_foci_counting.png)
