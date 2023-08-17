@@ -10,12 +10,12 @@ threshold_methods = ["FoCo", "minimum", "yen"]
 
 
 def segment_nuclei(img,
-                   saturate_perc=3,
+                   saturate_perc=6,
                    sm_radius=4,
                    seed_distance=35):
 
     # saturate 6% of pixels (3% on top and 3% on bottom)
-    p1, p2 = np.percentile(img, (saturate_perc, 100 - saturate_perc))
+    p1, p2 = np.percentile(img, (saturate_perc/2, 100 - (saturate_perc/2)))
     dapi_img_proc = exposure.rescale_intensity(img, in_range=(p1, p2))
 
     # smoothing with median filter

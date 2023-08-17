@@ -33,6 +33,9 @@ def process_files(input_dir,
                   nucleus_ch=1,
                   foci_ch=3,
                   bit_depth=12,
+                  saturate_perc=6,
+                  sm_radius=4,
+                  seed_distance=35,
                   th_method="FoCo",
                   int_cutoff=0.5):
 
@@ -82,7 +85,10 @@ def process_files(input_dir,
             dapi_img = np.max(dapi_img_stack, axis=0)
 
             # segment nuclei using thresholding and watershed
-            df, labeled_nuclei, nucleus_img_overlay = segment_nuclei(dapi_img)
+            df, labeled_nuclei, nucleus_img_overlay = segment_nuclei(dapi_img,
+                                                                     saturate_perc,
+                                                                     sm_radius,
+                                                                     seed_distance)
 
             # save the image overlay for checking segmentation results
             plt.imsave(os.path.join(output_dir, "segmentation", f"{file_root}_v{i}.png"), nucleus_img_overlay)
@@ -202,14 +208,17 @@ def process_files(input_dir,
         "orientation": "horizontal",
         "choices": [8, 12, 16, 32],
     },
-    Threshold_Method={
+    CE_pixel_saturation={"label": "CE px saturation (%)", "min": 0, "max": 100},
+    Smoothing_radius={"min": 1, "max": 10},
+    WS_seed_distance={"label": "WS seed distance", "min": 1, "max": 1000},
+    Foci_Threshold_Method={
         "widget_type": "RadioButtons",
         "orientation": "horizontal",
         "choices": threshold_methods,
     },
     Intensity_cutoff={"label": "Intensity cutoff (FoCo)", "min": 0, "max": 1.0},
-    Nucleus_min_area={"label": "Nucleus min area (px)"},
-    Nucleus_max_area={"label": "Nucleus max area (px)"},
+    Nucleus_min_area={"label": "Nucl min area (px)"},
+    Nucleus_max_area={"label": "Nucl max area (px)"},
     Nucleus_min_solidity={"min": 0, "max": 1.0},
     Foci_max_area={"label": "Foci max area (px)"},
     Count_Foci={"widget_type": "PushButton"},
@@ -218,14 +227,17 @@ def process_files(input_dir,
 def count_foci_widget(
     Input_Directory=Path("."),
     Output_Directory=Path("."),
-    Nucleus_Channel=1,
-    Foci_Channel=3,
     Bit_depth=12,
-    Threshold_Method="FoCo",
-    Intensity_cutoff=0.5,
+    Nucleus_Channel=1,
+    CE_pixel_saturation=6,
+    Smoothing_radius=4,
+    WS_seed_distance=35,
     Nucleus_min_area=1600,
     Nucleus_max_area=8000,
     Nucleus_min_solidity=0.92,
+    Foci_Channel=3,
+    Foci_Threshold_Method="FoCo",
+    Intensity_cutoff=0.5,
     Foci_max_area=250,
     Count_Foci=True
 ):
@@ -287,12 +299,15 @@ def count_foci():
     Nucleus_Channel = count_foci_widget.Nucleus_Channel.value
     Foci_Channel = count_foci_widget.Foci_Channel.value
     Bit_depth = count_foci_widget.Bit_depth.value
-    Threshold_Method = count_foci_widget.Threshold_Method.value
+    Threshold_Method = count_foci_widget.Foci_Threshold_Method.value
     Intensity_cutoff = count_foci_widget.Intensity_cutoff.value
     Nucleus_min_area = count_foci_widget.Nucleus_min_area.value
     Nucleus_max_area = count_foci_widget.Nucleus_max_area.value
     Nucleus_min_solidity = count_foci_widget.Nucleus_min_solidity.value
     Foci_max_area = count_foci_widget.Foci_max_area.value
+    CE_pixel_saturation = count_foci_widget.CE_pixel_saturation.value
+    Smoothing_radius = count_foci_widget.Smoothing_radius.value
+    WS_seed_distance = count_foci_widget.WS_seed_distance.value
 
     try:
         nucleus_df, foci_df, msg = process_files(Input_Directory,
@@ -300,6 +315,9 @@ def count_foci():
                                                  Nucleus_Channel,
                                                  Foci_Channel,
                                                  Bit_depth,
+                                                 CE_pixel_saturation,
+                                                 Smoothing_radius,
+                                                 WS_seed_distance,
                                                  Threshold_Method,
                                                  Intensity_cutoff)
         if len(foci_df) > 0:
@@ -359,11 +377,14 @@ if __name__ == "__main__":
     # Adjust the widths of some entry boxes
     w.Nucleus_Channel.width = 100
     w.Foci_Channel.width = 100
-    w.Threshold_Method.width = 100
+    w.Foci_Threshold_Method.width = 100
     w.Intensity_cutoff.width = 100
     w.Nucleus_min_area.width = 100
     w.Nucleus_max_area.width = 100
     w.Nucleus_min_solidity.width = 100
     w.Foci_max_area.width = 100
+    w.CE_pixel_saturation.width = 100
+    w.Smoothing_radius.width = 100
+    w.WS_seed_distance.width = 100
 
     app.exec_()
