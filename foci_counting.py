@@ -61,7 +61,7 @@ def process_files(input_dir,
 
     if len(nd2_files) == 0:
         # Commonly, this happens when the user enters a mistake in the path
-        return pd.DataFrame(), f"No nd2 files found in the path: '{input_dir}'"
+        return pd.DataFrame(), pd.DataFrame(), f"No nd2 files found in the path: '{input_dir}'"
     else:
         file_count = len(nd2_files)
 
@@ -71,6 +71,8 @@ def process_files(input_dir,
         print(f"Processing {file_root}")
 
         images = ND2Reader(nd2_file)
+        print(images.sizes)
+
         images.bundle_axes = 'vczyx'
 
         for i, fov in enumerate(images[0]):
@@ -300,33 +302,36 @@ def count_foci():
                                                  Bit_depth,
                                                  Threshold_Method,
                                                  Intensity_cutoff)
+        if len(foci_df) > 0:
+            # Save full data frames, including all nuclei and all foci data (no filtering)
+            foci_df.to_csv(os.path.join(Output_Directory, "foci_data.txt"),
+                           sep='\t',
+                           index=False)
 
-        # Save full data frames, including all nuclei and all foci data (no filtering)
-        foci_df.to_csv(os.path.join(Output_Directory, "foci_data.txt"),
-                       sep='\t',
-                       index=False)
-        nucleus_df.to_csv(os.path.join(Output_Directory, "nucleus_data.txt"),
-                          sep='\t',
-                          index=False)
+        if len(nucleus_df) > 0:
+            nucleus_df.to_csv(os.path.join(Output_Directory, "nucleus_data.txt"),
+                              sep='\t',
+                              index=False)
 
-        # Apply filters, save final results
-        apply_filters(foci_df,
-                      nucleus_df,
-                      os.path.join(Output_Directory, "final_results.txt"),
-                      Foci_max_area,
-                      Nucleus_min_area,
-                      Nucleus_max_area,
-                      Nucleus_min_solidity)
-
-        # Save foci and nuclei props as histograms and scatter plots
-        save_foci_props(foci_df,
-                        os.path.join(Output_Directory, "Foci_properties.png"),
-                        Foci_max_area)
-        save_nuclei_props(nucleus_df,
-                          os.path.join(Output_Directory, "Nucleus_properties.png"),
+        if len(foci_df) > 0 or len(nucleus_df) > 0:
+            # Apply filters, save final results
+            apply_filters(foci_df,
+                          nucleus_df,
+                          os.path.join(Output_Directory, "final_results.txt"),
+                          Foci_max_area,
                           Nucleus_min_area,
                           Nucleus_max_area,
                           Nucleus_min_solidity)
+
+            # Save foci and nuclei props as histograms and scatter plots
+            save_foci_props(foci_df,
+                            os.path.join(Output_Directory, "Foci_properties.png"),
+                            Foci_max_area)
+            save_nuclei_props(nucleus_df,
+                              os.path.join(Output_Directory, "Nucleus_properties.png"),
+                              Nucleus_min_area,
+                              Nucleus_max_area,
+                              Nucleus_min_solidity)
 
         # Inform user of results
         msg_box = QMessageBox()
