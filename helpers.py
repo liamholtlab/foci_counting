@@ -1,18 +1,96 @@
 import numpy as np
-from skimage import filters, measure, feature, segmentation, morphology, exposure
+from skimage import (
+    filters,
+    measure,
+    feature,
+    segmentation,
+    morphology,
+    exposure,
+    transform
+)
 from scipy import ndimage
 import pandas as pd
 import cv2
 import matplotlib.pyplot as plt
 import seaborn as sns
+import pickle
+from csbdeep.utils import normalize
 
 threshold_methods = ["FoCo", "minimum", "yen"]
+segmentation_methods = ['StarDist', 'Threshold']
 
 
-def segment_nuclei(img,
-                   saturate_perc=6,
-                   sm_radius=4,
-                   seed_distance=35):
+def load_settings(filename, main_widget):
+    try:
+        fp = open(filename, "rb")
+        settings = pickle.load(fp)
+        fp.close()
+        for widget in main_widget:
+            if widget.name in settings:
+                widget.value = settings[widget.name]
+        return True
+    except FileNotFoundError:
+        return False
+    except pickle.UnpicklingError:
+        return False
+    except EOFError:
+        return False
+
+
+def save_settings(filename, main_widget):
+    try:
+        fp = open(filename, "wb")
+        settings = {}
+        for widget in main_widget:
+            settings[widget.name] = widget.value
+        pickle.dump(settings, fp)
+        fp.close()
+        return True
+    except FileNotFoundError:
+        return False
+    except pickle.PicklingError:
+        return False
+
+
+def segment_nuclei_stardist(img,
+                            model,
+                            scale_factor=0.5):
+
+    labels, _ = model.predict_instances(normalize(transform.rescale(img, scale_factor)))
+    labels = transform.resize(labels, img.shape, order=0, preserve_range=True)
+
+    # df is a data frame of identified nuclei
+    df = pd.DataFrame(measure.regionprops_table(labels,
+                                                properties=['label',
+                                                            'area',
+                                                            'solidity',
+                                                            'bbox',
+                                                            'coords',
+                                                            'centroid'
+                                                            ]))
+
+    # SAVE IMAGE FOR CHECKING - overlap nucleus area/solidity for each
+    img_uint8 = exposure.rescale_intensity(img, out_range=(0, 255)).astype('uint8')
+    image_label_overlay = segmentation.mark_boundaries(img_uint8,
+                                                       labels,
+                                                       color=[0, 1, 0],
+                                                       mode='inner')
+    for row in df.iterrows():
+        label_ = f"{row[1]['label']}: {round(row[1]['area'], 0)}|{round(row[1]['solidity'], 2)}"
+        draw_label_on_image(image_label_overlay,
+                            int(row[1]['centroid-0']),
+                            int(row[1]['centroid-1']),
+                            label_,
+                            text_color=[1, 1, 1])
+
+    return df, labels, image_label_overlay
+
+
+def segment_nuclei_th(img,
+                      saturate_perc=6,
+                      sm_radius=4,
+                      closing_radius=2,
+                      seed_distance=35):
 
     # saturate 6% of pixels (3% on top and 3% on bottom)
     p1, p2 = np.percentile(img, (saturate_perc/2, 100 - (saturate_perc/2)))
@@ -27,6 +105,9 @@ def segment_nuclei(img,
 
     # fill holes
     dapi_mask = ndimage.binary_fill_holes(dapi_mask)
+
+    # close shapes: helps with nuclei not fully segmented
+    dapi_mask = morphology.binary_closing(dapi_mask, footprint=morphology.disk(closing_radius))
 
     # watershed - separates touching:
     labeled_image = measure.label(dapi_mask)
