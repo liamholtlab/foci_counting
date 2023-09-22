@@ -101,7 +101,7 @@ def process_files(input_dir,
             images = io.imread(img_file)
             # print(images.max())
             n_fov = 1
-
+        print("n_fov:", n_fov)
         for i in range(n_fov):
             if file_type == 'nd2':
                 fov = images[i]
@@ -142,6 +142,11 @@ def process_files(input_dir,
                 h2ax_img = np.max(h2ax_img_stack, axis=0)
             else:
                 h2ax_img = fov[foci_ch]
+
+            # Max of the image - check bit depth
+            img_max = np.max(h2ax_img)
+            if img_max > 2 ** bit_depth - 1:
+                print(f"Warning: image max is {img_max}, using {bit_depth} bit depth")
 
             # identify H2AX foci by thresholding
             h2ax_img = exposure.rescale_intensity(h2ax_img,
