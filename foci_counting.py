@@ -95,7 +95,7 @@ def process_files(input_dir,
             print(images.sizes)
             images.bundle_axes = 'vczyx'
             images = images[0]  # ND2Reader adds an extra dimension to the beginning
-            n_fov = len(images[0])
+            n_fov = len(images)
         else:
             # TIF file is a z-projection of a single FOV
             images = io.imread(img_file)
