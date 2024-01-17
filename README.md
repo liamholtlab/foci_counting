@@ -17,3 +17,6 @@
 `python foci_counting.py`
 
 ![Screenshot_foci_counting.png](Screenshot_foci_counting.png)
+
+*NOTE:* If GUI does not open in Mac, try executing this line in terminal:
+`export QT_MAC_WANTS_LAYER=1`
