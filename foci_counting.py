@@ -41,6 +41,7 @@ def process_files(input_dir,
                   output_dir,
                   nucleus_ch=1,
                   foci_ch=3,
+                  intensity_ch=2,
                   bit_depth=12,
                   file_type='nd2',
                   segmentation_method='StarDist',
@@ -50,6 +51,8 @@ def process_files(input_dir,
                   cl_radius=2,
                   seed_distance=35,
                   th_method="FoCo",
+                  foco_sm_r=0,
+                  foco_bk_r=0,
                   int_cutoff=0.5):
 
     # label all foci with area greater than 100px, for helping estimate size cutoff
@@ -115,9 +118,20 @@ def process_files(input_dir,
             else:
                 dapi_img = fov[nucleus_ch]
 
+            # z-project the intensity channel
+            if intensity_ch >= 0:
+                if file_type == 'nd2':
+                    int_img_stack = fov[intensity_ch]
+                    int_img = np.mean(int_img_stack, axis=0)
+                else:
+                    int_img = fov[intensity_ch]
+            else:
+                int_img = None
+
             if segmentation_method == 'Thresholding':
                 # segment nuclei using thresholding and watershed
                 df, labeled_nuclei, nucleus_img_overlay = segment_nuclei_th(dapi_img,
+                                                                            int_img,
                                                                             saturate_perc,
                                                                             sm_radius,
                                                                             cl_radius,
@@ -126,15 +140,20 @@ def process_files(input_dir,
                 # segment with stardist
                 df, labeled_nuclei, nucleus_img_overlay = segment_nuclei_stardist(dapi_img,
                                                                                   sd_model,
+                                                                                  int_img,
                                                                                   rescale_factor)
             else:
                 print(f"Error: unknown threshold method {th_method}, using 'StarDist'")
                 df, labeled_nuclei, nucleus_img_overlay = segment_nuclei_stardist(dapi_img,
                                                                                   sd_model,
+                                                                                  int_img,
                                                                                   rescale_factor)
-
             # save the image overlay for checking segmentation results
             plt.imsave(os.path.join(output_dir, "segmentation", f"{file_root}_v{i}.png"), nucleus_img_overlay)
+
+            # Calculate mean intensity of the background for the intensity channel (for calculating CTCF)
+            if int_img is not None:
+                intensity_ch_mean_bk = np.mean(int_img[labeled_nuclei == 0])
 
             # z-project the foci channel
             if file_type == 'nd2':
@@ -162,10 +181,10 @@ def process_files(input_dir,
                 h2ax_th = filters.threshold_yen(h2ax_img - res)
                 h2ax_mask = (h2ax_img - res) > h2ax_th
             elif th_method == 'FoCo':
-                h2ax_mask = foci_thresh(h2ax_img, 0, 0, custom_thresh)
+                h2ax_mask = foci_thresh(h2ax_img, foco_sm_r, foco_bk_r, custom_thresh)
             else:
                 print(f"Error: unknown threshold method {th_method}, using 'FoCo'")
-                h2ax_mask = foci_thresh(h2ax_img, 0, 0, custom_thresh)
+                h2ax_mask = foci_thresh(h2ax_img, foco_sm_r, foco_bk_r, custom_thresh)
 
             h2ax_mask = ndimage.binary_fill_holes(h2ax_mask)
             labeled_h2ax = measure.label(h2ax_mask)
@@ -216,12 +235,13 @@ def process_files(input_dir,
                     foci_data = pd.concat([foci_data, foci_df], axis=0, ignore_index=True)
 
                 # Save the nucleus data as a single row, included foci count
-                nucleus_data.append([file_root,
-                                     i,
-                                     row[1]['label'],
-                                     row[1]['area'],
-                                     row[1]['solidity'],
-                                     len(foci_df)])
+                nucleus_row = [file_root, i, row[1]['label'], row[1]['area'], row[1]['solidity']]
+                if int_img is not None:
+                    nucleus_row.append(row[1]['area']*(row[1]['mean_intensity']-intensity_ch_mean_bk))
+                else:
+                    nucleus_row.append(0)
+                nucleus_row.append(len(foci_df))
+                nucleus_data.append(nucleus_row)
 
             # SAVE FOCI IMAGE FOR CHECKING
             plt.imsave(os.path.join(output_dir, "foci", f"{file_root}_v{i}.png"), h2ax_image_label_overlay)
@@ -233,6 +253,7 @@ def process_files(input_dir,
                                                            'nucleus_label',
                                                            'nucleus_area',
                                                            'nucleus_solidity',
+                                                           f'CTCF_ch{intensity_ch+1}',
                                                            'foci_count'
                                                            ])
     if len(foci_data) > 0:
@@ -269,21 +290,23 @@ def process_files(input_dir,
     #     "orientation": "horizontal",
     #     "choices": ['vczyx', 'vcyx', 'czyx', 'cyx'],
     # },
-    Segmentation_method={
-        "widget_type": "RadioButtons",
-        "orientation": "horizontal",
-        "choices": segmentation_methods,
-    },
-    Rescale_factor={"min": 0, "max": 1.0},
-    CE_pixel_saturation={"label": "CE px saturation (%)", "min": 0, "max": 100},
-    Smoothing_radius={"min": 1, "max": 10},
-    Closing_radius={"min": 1, "max": 10},
-    WS_seed_distance={"label": "WS seed distance", "min": 1, "max": 1000},
+    #Segmentation_method={
+    #    "widget_type": "RadioButtons",
+    #    "orientation": "horizontal",
+    #    "choices": segmentation_methods,
+    #},
+    StarDist_Rescale_factor={"min": 0, "max": 1.0},
+    #CE_pixel_saturation={"label": "CE px saturation (%)", "min": 0, "max": 100},
+    #Smoothing_radius={"min": 1, "max": 10},
+    #Closing_radius={"min": 1, "max": 10},
+    #WS_seed_distance={"label": "WS seed distance", "min": 1, "max": 1000},
     Foci_Threshold_Method={
         "widget_type": "RadioButtons",
         "orientation": "horizontal",
         "choices": threshold_methods,
     },
+    Foco_sm_size={"label": "AdpM filter size (FoCo)", "min": 0, "max": 100},
+    Foco_bk_radius={"label": "Opening radius (FoCo)", "min": 0, "max": 100},
     Intensity_cutoff={"label": "Intensity cutoff (FoCo)", "min": 0, "max": 1.0},
     Nucleus_min_area={"label": "Nucl min area (px)", "min": 0, "max": 1000000},
     Nucleus_max_area={"label": "Nucl max area (px)", "min": 0, "max": 1000000},
@@ -298,21 +321,25 @@ def count_foci_widget(
     Bit_depth=12,
     File_type='nd2',
     #Stack_order='vczyx',
-    Nucleus_Channel=1,
-    Segmentation_method="StarDist",
-    Rescale_factor=0.5,
-    CE_pixel_saturation=6,
-    Smoothing_radius=4,
-    Closing_radius=2,
-    WS_seed_distance=35,
+    Nucleus_Channel=2,
+    #Segmentation_method="StarDist",
+    StarDist_Rescale_factor=0.5,
+    #CE_pixel_saturation=6,
+    #Smoothing_radius=4,
+    #Closing_radius=2,
+    #WS_seed_distance=35,
+    Intensity_channel=3,
+    Foci_Channel=4,
+    Foci_Threshold_Method="FoCo",
+    Foco_sm_size=0,
+    Foco_bk_radius=0,
+    Intensity_cutoff=0.5,
+    Foci_max_area=250,
     Nucleus_min_area=1600,
     Nucleus_max_area=8000,
     Nucleus_min_solidity=0.92,
-    Foci_Channel=3,
-    Foci_Threshold_Method="FoCo",
-    Intensity_cutoff=0.5,
-    Foci_max_area=250,
     Count_Foci=True
+    # *NOTE* channel numbers are 1-based, and Intensity_channel set to 0 means no intensity channel measurement
 ):
     try:
         print(f'Filtering data with new cutoffs.  Old (filtered) file will be overwritten.')
@@ -386,38 +413,58 @@ def count_foci():
         Output_Directory = count_foci_widget.Output_Directory.value
         Nucleus_Channel = count_foci_widget.Nucleus_Channel.value
         Foci_Channel = count_foci_widget.Foci_Channel.value
+        Intensity_channel = count_foci_widget.Intensity_channel.value
         Bit_depth = count_foci_widget.Bit_depth.value
         Threshold_Method = count_foci_widget.Foci_Threshold_Method.value
+        Foco_sm_size = count_foci_widget.Foco_sm_size.value
+        Foco_bk_radius = count_foci_widget.Foco_bk_radius.value
         Intensity_cutoff = count_foci_widget.Intensity_cutoff.value
         Nucleus_min_area = count_foci_widget.Nucleus_min_area.value
         Nucleus_max_area = count_foci_widget.Nucleus_max_area.value
         Nucleus_min_solidity = count_foci_widget.Nucleus_min_solidity.value
         Foci_max_area = count_foci_widget.Foci_max_area.value
-        CE_pixel_saturation = count_foci_widget.CE_pixel_saturation.value
-        Smoothing_radius = count_foci_widget.Smoothing_radius.value
-        Closing_radius = count_foci_widget.Closing_radius.value
-        WS_seed_distance = count_foci_widget.WS_seed_distance.value
+        #CE_pixel_saturation = count_foci_widget.CE_pixel_saturation.value
+        #Smoothing_radius = count_foci_widget.Smoothing_radius.value
+        #Closing_radius = count_foci_widget.Closing_radius.value
+        #WS_seed_distance = count_foci_widget.WS_seed_distance.value
         File_type = count_foci_widget.File_type.value
-        Segmentation_method = count_foci_widget.Segmentation_method.value
-        Rescale_factor = count_foci_widget.Rescale_factor.value
+        #Segmentation_method = count_foci_widget.Segmentation_method.value
+        StarDist_Rescale_factor = count_foci_widget.StarDist_Rescale_factor.value
 
         # Save parameter settings to file
         save_settings(settings_file, count_foci_widget)
 
         # Execute foci finding
+        # threshold method for segmentation no longer selected by user, always use StarDist
+        Segmentation_method = 'StarDist'
+
+        # parameters for thresholding method (not used if using StarDist)
+        CE_pixel_saturation = 6
+        Smoothing_radius = 4
+        Closing_radius = 2
+        WS_seed_distance = 35
+
+        # channel numbers are 1-based, fix for proper indexing
+        Intensity_channel = Intensity_channel-1
+        Nucleus_Channel = Nucleus_Channel-1
+        Foci_Channel = Foci_Channel-1
+
         nucleus_df, foci_df, msg = process_files(input_dir=Input_Directory,
                                                  output_dir=Output_Directory,
                                                  nucleus_ch=Nucleus_Channel,
                                                  foci_ch=Foci_Channel,
+                                                 intensity_ch=Intensity_channel,
                                                  bit_depth=Bit_depth,
                                                  file_type=File_type,
                                                  segmentation_method=Segmentation_method,
-                                                 rescale_factor=Rescale_factor,
+                                                 rescale_factor=StarDist_Rescale_factor,
                                                  saturate_perc=CE_pixel_saturation,
                                                  sm_radius=Smoothing_radius,
                                                  cl_radius=Closing_radius,
                                                  seed_distance=WS_seed_distance,
                                                  th_method=Threshold_Method,
+                                                 foco_sm_r=Foco_sm_size,
+                                                 foco_bk_r=Foco_bk_radius,
                                                  int_cutoff=Intensity_cutoff)
 
         # Save full data frames, including all nuclei and all foci data (no filtering)
@@ -482,16 +529,19 @@ if __name__ == "__main__":
 
     # Adjust the widths of some entry boxes
     w.Nucleus_Channel.width = 100
+    w.Intensity_channel.width = 100
     w.Foci_Channel.width = 100
     w.Foci_Threshold_Method.width = 100
     w.Intensity_cutoff.width = 100
+    w.Foco_sm_size.width = 100
+    w.Foco_bk_radius.width = 100
     w.Nucleus_min_area.width = 100
     w.Nucleus_max_area.width = 100
     w.Nucleus_min_solidity.width = 100
     w.Foci_max_area.width = 100
-    w.CE_pixel_saturation.width = 100
-    w.Smoothing_radius.width = 100
-    w.Closing_radius.width = 100
-    w.WS_seed_distance.width = 100
+    #w.CE_pixel_saturation.width = 100
+    #w.Smoothing_radius.width = 100
+    #w.Closing_radius.width = 100
+    #w.WS_seed_distance.width = 100
 
     app.exec_()
