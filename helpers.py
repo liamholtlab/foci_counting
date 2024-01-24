@@ -54,19 +54,17 @@ def save_settings(filename, main_widget):
 
 def segment_nuclei_stardist(img,
                             model,
-                            intensity_img=None,
                             scale_factor=0.5):
 
     labels, _ = model.predict_instances(normalize(transform.rescale(img, scale_factor)))
     labels = transform.resize(labels, img.shape, order=0, preserve_range=True)
 
+    # clear those touching border
+    labels = segmentation.clear_border(labels)
+
     # df is a data frame of identified nuclei
     props = ['label', 'area', 'solidity', 'bbox', 'coords', 'centroid']
-    if intensity_img is not None:
-        props.append('mean_intensity')
-        df = pd.DataFrame(measure.regionprops_table(labels, intensity_img, properties=props))
-    else:
-        df = pd.DataFrame(measure.regionprops_table(labels, properties=props))
+    df = pd.DataFrame(measure.regionprops_table(labels, properties=props))
 
     # SAVE IMAGE FOR CHECKING - overlap nucleus area/solidity for each
     img_uint8 = exposure.rescale_intensity(img, out_range=(0, 255)).astype('uint8')
@@ -86,7 +84,6 @@ def segment_nuclei_stardist(img,
 
 
 def segment_nuclei_th(img,
-                      intensity_img=None,
                       saturate_perc=6,
                       sm_radius=4,
                       closing_radius=2,
@@ -137,11 +134,7 @@ def segment_nuclei_th(img,
 
     # df is a data frame of identified nuclei
     props = ['label', 'area', 'solidity', 'bbox', 'coords', 'centroid']
-    if intensity_img is not None:
-        props.append('mean_intensity')
-        df = pd.DataFrame(measure.regionprops_table(labels, intensity_img, properties=props))
-    else:
-        df = pd.DataFrame(measure.regionprops_table(labels, properties=props))
+    df = pd.DataFrame(measure.regionprops_table(labels, properties=props))
 
     # SAVE IMAGE FOR CHECKING - overlap nucleus area/solidity for each
     img_uint8 = exposure.rescale_intensity(img, out_range=(0, 255)).astype('uint8')

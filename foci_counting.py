@@ -77,7 +77,7 @@ def process_files(input_dir,
     # Data structures for the output data frames: all foci data, and summary nucleus data
     # Note: summary nucleus data will include zero counts for nuclei without any foci (not included in foci data)
     foci_data = pd.DataFrame()
-    nucleus_data = []
+    nucleus_data = pd.DataFrame()
 
     # Read in nd2 files from input directory
     img_files = glob.glob(os.path.join(input_dir, f"*.{file_type}"))
@@ -118,20 +118,9 @@ def process_files(input_dir,
             else:
                 dapi_img = fov[nucleus_ch]
 
-            # z-project the intensity channel
-            if intensity_ch >= 0:
-                if file_type == 'nd2':
-                    int_img_stack = fov[intensity_ch]
-                    int_img = np.mean(int_img_stack, axis=0)
-                else:
-                    int_img = fov[intensity_ch]
-            else:
-                int_img = None
-
             if segmentation_method == 'Thresholding':
                 # segment nuclei using thresholding and watershed
                 df, labeled_nuclei, nucleus_img_overlay = segment_nuclei_th(dapi_img,
-                                                                            int_img,
                                                                             saturate_perc,
                                                                             sm_radius,
                                                                             cl_radius,
@@ -140,122 +129,171 @@ def process_files(input_dir,
                 # segment with stardist
                 df, labeled_nuclei, nucleus_img_overlay = segment_nuclei_stardist(dapi_img,
                                                                                   sd_model,
-                                                                                  int_img,
                                                                                   rescale_factor)
             else:
                 print(f"Error: unknown threshold method {th_method}, using 'StarDist'")
                 df, labeled_nuclei, nucleus_img_overlay = segment_nuclei_stardist(dapi_img,
                                                                                   sd_model,
-                                                                                  int_img,
                                                                                   rescale_factor)
             # save the image overlay for checking segmentation results
             plt.imsave(os.path.join(output_dir, "segmentation", f"{file_root}_v{i}.png"), nucleus_img_overlay)
 
-            # Calculate mean intensity of the background for the intensity channel (for calculating CTCF)
-            if int_img is not None:
-                intensity_ch_mean_bk = np.mean(int_img[labeled_nuclei == 0])
-
-            # z-project the foci channel
-            if file_type == 'nd2':
-                h2ax_img_stack = fov[foci_ch]
-                h2ax_img = np.max(h2ax_img_stack, axis=0)
-            else:
-                h2ax_img = fov[foci_ch]
-
-            # Max of the image - check bit depth
-            img_max = np.max(h2ax_img)
-            if img_max > 2 ** bit_depth - 1:
-                print(f"Warning: image max is {img_max}, using {bit_depth} bit depth")
-
-            # identify H2AX foci by thresholding
-            h2ax_img = exposure.rescale_intensity(h2ax_img,
-                                                  out_range=(0, 2 ** bit_depth - 1)).astype(type_map[bit_depth])
-            h2ax_img_uint8 = exposure.rescale_intensity(h2ax_img, out_range=(0, 255)).astype('uint8')
-
-            if th_method == 'minimum':
-                # use to 8-bit, otherwise the minimum threshold algorithm has trouble finding 2 peaks
-                h2ax_th = IJ_threshold_minimum(h2ax_img_uint8)
-                h2ax_mask = h2ax_img_uint8 > h2ax_th
-            elif th_method == 'yen':
-                res = morphology.white_tophat(h2ax_img, morphology.disk(1))
-                h2ax_th = filters.threshold_yen(h2ax_img - res)
-                h2ax_mask = (h2ax_img - res) > h2ax_th
-            elif th_method == 'FoCo':
-                h2ax_mask = foci_thresh(h2ax_img, foco_sm_r, foco_bk_r, custom_thresh)
-            else:
-                print(f"Error: unknown threshold method {th_method}, using 'FoCo'")
-                h2ax_mask = foci_thresh(h2ax_img, foco_sm_r, foco_bk_r, custom_thresh)
-
-            h2ax_mask = ndimage.binary_fill_holes(h2ax_mask)
-            labeled_h2ax = measure.label(h2ax_mask)
-
-            h2ax_image_label_overlay = segmentation.mark_boundaries(h2ax_img_uint8,
-                                                                    labeled_h2ax,
-                                                                    color=[1, 0, 0],
-                                                                    mode='inner')
-            h2ax_image_label_overlay = segmentation.mark_boundaries(h2ax_image_label_overlay,
-                                                                    labeled_nuclei,
-                                                                    color=[0, 1, 0],
-                                                                    mode='inner')
-
-            # Count foci for each nucleus
-            for row in df.iterrows():
-                coords = row[1]['coords']
-                rr, cc = list(zip(*coords))
-
-                # mask out any foci outside current nucleus, then threshold and count
-                mult_img = np.zeros_like(h2ax_mask)
-                mult_img[rr, cc] = True
-                nucleus_h2ax_mask = h2ax_mask * mult_img
-
-                # label and count
-                nucl_labeled_h2ax = measure.label(nucleus_h2ax_mask)
-                foci_df = pd.DataFrame(measure.regionprops_table(nucl_labeled_h2ax,
-                                                                 h2ax_img,
-                                                                 properties=['label',
-                                                                             'area',
-                                                                             'mean_intensity',
-                                                                             'centroid'
-                                                                             ]))
-                for foci_row in foci_df[foci_df['area'] > foci_min_area_for_label].iterrows():
-                    # label all large foci with their area on the check image
-                    draw_label_on_image(h2ax_image_label_overlay,
-                                        int(foci_row[1]['centroid-0']),
-                                        int(foci_row[1]['centroid-1']),
-                                        f"{round(foci_row[1]['area'], 0)}",
-                                        text_color=[0, 0, 1])
-                # Save the foci areas + count for each nucleus, and add to main data frame
-                if len(foci_df) > 0:
-                    foci_df.rename({'area': 'foci_area', 'mean_intensity': 'foci_mean_intensity'}, axis=1, inplace=True)
-                    foci_df.drop(['label', 'centroid-0', 'centroid-1'], axis=1, inplace=True)
-                    foci_df['file'] = file_root
-                    foci_df['fov'] = i
-                    foci_df['nucleus_label'] = row[1]['label']
-                    foci_df['foci_count'] = len(foci_df)
-                    foci_data = pd.concat([foci_data, foci_df], axis=0, ignore_index=True)
-
-                # Save the nucleus data as a single row, included foci count
-                nucleus_row = [file_root, i, row[1]['label'], row[1]['area'], row[1]['solidity']]
-                if int_img is not None:
-                    nucleus_row.append(row[1]['area']*(row[1]['mean_intensity']-intensity_ch_mean_bk))
+            # z-project the intensity channel
+            if intensity_ch >= 0:
+                if file_type == 'nd2':
+                    int_img_stack = fov[intensity_ch]
+                    int_img = np.mean(int_img_stack, axis=0)
                 else:
-                    nucleus_row.append(0)
-                nucleus_row.append(len(foci_df))
-                nucleus_data.append(nucleus_row)
+                    int_img = fov[intensity_ch]
 
-            # SAVE FOCI IMAGE FOR CHECKING
-            plt.imsave(os.path.join(output_dir, "foci", f"{file_root}_v{i}.png"), h2ax_image_label_overlay)
+                # Calculate mean intensity of the background (for calculating CTCF)
+                th = filters.threshold_otsu(int_img)
+                mean_bk = np.mean(int_img[int_img < th])
+
+                # Get mean intensity in each nucleus, join with original df
+                df_int = pd.DataFrame(measure.regionprops_table(labeled_nuclei,
+                                                                int_img,
+                                                                properties=['label', 'mean_intensity']))
+                df = df.join(df_int.set_index('label'), on='label', how='left')
+                df.rename({'mean_intensity': f'mean_intensity_ch{intensity_ch + 1}'}, axis=1, inplace=True)
+
+                # CTCF
+                df[f'background_intensity_ch{intensity_ch + 1}'] = mean_bk
+                df[f'CTCF_ch{intensity_ch + 1}'] = df['area'] * (
+                        df[f'mean_intensity_ch{intensity_ch + 1}'] - df[f'background_intensity_ch{intensity_ch + 1}'])
+
+            else:
+                int_img = None
+
+            # z-project the foci channel (max project and avg project)
+            if foci_ch >= 0:
+                if file_type == 'nd2':
+                    h2ax_img_stack = fov[foci_ch]
+                    h2ax_img = np.max(h2ax_img_stack, axis=0)
+                    h2ax_img_avgpr = np.mean(h2ax_img_stack, axis=0)
+                else:
+                    h2ax_img = fov[foci_ch]
+                    h2ax_img_avgpr = fov[foci_ch]
+
+                # Calculate mean intensity of the background (for calculating CTCF) using average projection
+                th = filters.threshold_otsu(h2ax_img_avgpr)
+                mean_bk = np.mean(h2ax_img_avgpr[h2ax_img_avgpr < th])
+
+                # Get mean intensity in each nucleus, join with original df
+                df_int = pd.DataFrame(measure.regionprops_table(labeled_nuclei,
+                                                                h2ax_img_avgpr,
+                                                                properties=['label', 'mean_intensity']))
+                df = df.join(df_int.set_index('label'), on='label', how='left')
+                df.rename({'mean_intensity': f'mean_intensity_ch{foci_ch+1} (foci)'}, axis=1, inplace=True)
+
+                # CTCF
+                df[f'background_intensity_ch{foci_ch+1} (foci)'] = mean_bk
+                df[f'CTCF_ch{foci_ch+1} (foci)'] = df['area'] * (
+                        df[f'mean_intensity_ch{foci_ch+1} (foci)'] - df[f'background_intensity_ch{foci_ch+1} (foci)'])
+
+                # identify H2AX foci
+
+                # Max of the image - check bit depth
+                img_max = np.max(h2ax_img)
+                if img_max > 2 ** bit_depth - 1:
+                    print(f"Warning: image max is {img_max}, using {bit_depth} bit depth")
+
+                h2ax_img = exposure.rescale_intensity(h2ax_img,
+                                                      out_range=(0, 2 ** bit_depth - 1)).astype(type_map[bit_depth])
+                h2ax_img_uint8 = exposure.rescale_intensity(h2ax_img, out_range=(0, 255)).astype('uint8')
+
+                if th_method == 'minimum':
+                    # use to 8-bit, otherwise the minimum threshold algorithm has trouble finding 2 peaks
+                    h2ax_th = IJ_threshold_minimum(h2ax_img_uint8)
+                    h2ax_mask = h2ax_img_uint8 > h2ax_th
+                elif th_method == 'yen':
+                    res = morphology.white_tophat(h2ax_img, morphology.disk(1))
+                    h2ax_th = filters.threshold_yen(h2ax_img - res)
+                    h2ax_mask = (h2ax_img - res) > h2ax_th
+                elif th_method == 'FoCo':
+                    h2ax_mask = foci_thresh(h2ax_img, foco_sm_r, foco_bk_r, custom_thresh)
+                else:
+                    print(f"Error: unknown threshold method {th_method}, using 'FoCo'")
+                    h2ax_mask = foci_thresh(h2ax_img, foco_sm_r, foco_bk_r, custom_thresh)
+
+                h2ax_mask = ndimage.binary_fill_holes(h2ax_mask)
+                labeled_h2ax = measure.label(h2ax_mask)
+
+                h2ax_image_label_overlay = segmentation.mark_boundaries(h2ax_img_uint8,
+                                                                        labeled_h2ax,
+                                                                        color=[1, 0, 0],
+                                                                        mode='inner')
+                h2ax_image_label_overlay = segmentation.mark_boundaries(h2ax_image_label_overlay,
+                                                                        labeled_nuclei,
+                                                                        color=[0, 1, 0],
+                                                                        mode='inner')
+
+                # Count foci for each nucleus
+                foci_counts = []
+                for row in df.iterrows():
+                    coords = row[1]['coords']
+                    rr, cc = list(zip(*coords))
+
+                    # mask out any foci outside current nucleus, then threshold and count
+                    mult_img = np.zeros_like(h2ax_mask)
+                    mult_img[rr, cc] = True
+                    nucleus_h2ax_mask = h2ax_mask * mult_img
+
+                    # label and count
+                    nucl_labeled_h2ax = measure.label(nucleus_h2ax_mask)
+                    foci_df = pd.DataFrame(measure.regionprops_table(nucl_labeled_h2ax,
+                                                                     h2ax_img,
+                                                                     properties=['label',
+                                                                                 'area',
+                                                                                 'mean_intensity',
+                                                                                 'centroid'
+                                                                                 ]))
+                    for foci_row in foci_df[foci_df['area'] > foci_min_area_for_label].iterrows():
+                        # label all large foci with their area on the check image
+                        draw_label_on_image(h2ax_image_label_overlay,
+                                            int(foci_row[1]['centroid-0']),
+                                            int(foci_row[1]['centroid-1']),
+                                            f"{round(foci_row[1]['area'], 0)}",
+                                            text_color=[0, 0, 1])
+                    # Save the foci areas + count for each nucleus, and add to main data frame
+                    if len(foci_df) > 0:
+                        foci_df.rename({'area': 'foci_area',
+                                        'mean_intensity': 'foci_mean_intensity'}, axis=1, inplace=True)
+                        foci_df.drop(['label', 'centroid-0', 'centroid-1'], axis=1, inplace=True)
+                        foci_df['file'] = file_root
+                        foci_df['fov'] = i
+                        foci_df['nucleus_label'] = row[1]['label']
+                        foci_df['foci_count'] = len(foci_df)
+                        foci_data = pd.concat([foci_data, foci_df], axis=0, ignore_index=True)
+
+                    # Save the foci count separately to join with the nucleus df
+                    foci_counts.append([row[1]['label'], len(foci_df)])
+
+                # SAVE FOCI IMAGE FOR CHECKING
+                plt.imsave(os.path.join(output_dir, "foci", f"{file_root}_v{i}.png"), h2ax_image_label_overlay)
+
+                # add foci counts to the nucleus df
+                foci_counts_df = pd.DataFrame(foci_counts, columns=['label', 'foci_count'])
+                df = df.join(foci_counts_df.set_index('label'), on='label', how='left')
+
+            # add file and fov to the nucleus df, drop unwanted columns and concat to full nucleus df
+            df['file'] = file_root
+            df['fov'] = i
+            df.rename({'label': 'nucleus_label',
+                       'area': 'nucleus_area',
+                       'solidity': 'nucleus_solidity'}, axis=1, inplace=True)
+            df.drop(['bbox-0', 'bbox-1', 'bbox-2', 'bbox-3', 'coords', 'centroid-0', 'centroid-1'], axis=1, inplace=True)
+            nucleus_data = pd.concat([nucleus_data, df], axis=0, ignore_index=True)
 
     # Fix up the return data
     if len(nucleus_data) > 0:
-        nucleus_data = pd.DataFrame(nucleus_data, columns=['file',
-                                                           'fov',
-                                                           'nucleus_label',
-                                                           'nucleus_area',
-                                                           'nucleus_solidity',
-                                                           f'CTCF_ch{intensity_ch+1}',
-                                                           'foci_count'
-                                                           ])
+        # Place file, fov and label columns first
+        cols = nucleus_data.columns.tolist()
+        cols.insert(0, cols.pop(cols.index('file')))
+        cols.insert(1, cols.pop(cols.index('fov')))
+        cols.insert(2, cols.pop(cols.index('nucleus_label')))
+        nucleus_data = nucleus_data[cols]
+
     if len(foci_data) > 0:
         # Re-order columns
         foci_data = foci_data[['file',
@@ -348,8 +386,15 @@ def count_foci_widget(
         save_settings(settings_file, count_foci_widget)
 
         # Re-load full data frames, including all nuclei and all foci data (no filtering)
-        foci_df = pd.read_csv(os.path.join(Output_Directory, "foci_data.txt"), sep='\t')
-        nucleus_df = pd.read_csv(os.path.join(Output_Directory, "nucleus_data.txt"), sep='\t')
+        if os.path.exists(os.path.join(Output_Directory, "foci_data.txt")):
+            foci_df = pd.read_csv(os.path.join(Output_Directory, "foci_data.txt"), sep='\t')
+        else:
+            foci_df = pd.DataFrame()
+
+        if os.path.exists(os.path.join(Output_Directory, "nucleus_data.txt")):
+            nucleus_df = pd.read_csv(os.path.join(Output_Directory, "nucleus_data.txt"), sep='\t')
+        else:
+            nucleus_df = pd.DataFrame()
 
         # Apply filters, save final results
         apply_filters(foci_df,
@@ -361,14 +406,16 @@ def count_foci_widget(
                       Nucleus_min_solidity)
 
         # Save foci and nuclei props as histograms and scatter plots
-        save_foci_props(foci_df,
-                        os.path.join(Output_Directory, "Foci_properties.png"),
-                        Foci_max_area)
-        save_nuclei_props(nucleus_df,
-                          os.path.join(Output_Directory, "Nucleus_properties.png"),
-                          Nucleus_min_area,
-                          Nucleus_max_area,
-                          Nucleus_min_solidity)
+        if len(foci_df) > 0:
+            save_foci_props(foci_df,
+                            os.path.join(Output_Directory, "Foci_properties.png"),
+                            Foci_max_area)
+        if len(nucleus_df) > 0:
+            save_nuclei_props(nucleus_df,
+                              os.path.join(Output_Directory, "Nucleus_properties.png"),
+                              Nucleus_min_area,
+                              Nucleus_max_area,
+                              Nucleus_min_solidity)
 
     except Exception:
         error_message = traceback.format_exc()
@@ -389,20 +436,24 @@ def apply_filters(foci_df,
                   nucleus_min_solidity):
 
     # Drop foci by area cutoff, and re-count
-    filtered_foci_df = foci_df[foci_df['foci_area'] < foci_max_area].copy()
-    count_df = pd.DataFrame(filtered_foci_df.groupby(['file', 'fov', 'nucleus_label']).size(),
-                            columns=['foci_count_r'])
+    if len(foci_df) > 0:
+        filtered_foci_df = foci_df[foci_df['foci_area'] < foci_max_area].copy()
+        count_df = pd.DataFrame(filtered_foci_df.groupby(['file', 'fov', 'nucleus_label']).size(),
+                                columns=['foci_count_r'])
 
-    # Update foci counts in the nucleus table
-    filtered_nucleus_df = nucleus_df.join(count_df, on=['file', 'fov', 'nucleus_label'], how='left')
-    filtered_nucleus_df['foci_count'] = filtered_nucleus_df['foci_count_r'].fillna(0)
-    filtered_nucleus_df.drop(['foci_count_r'], axis=1, inplace=True)
+        # Update foci counts in the nucleus table
+        filtered_nucleus_df = nucleus_df.join(count_df, on=['file', 'fov', 'nucleus_label'], how='left')
+        filtered_nucleus_df['foci_count'] = filtered_nucleus_df['foci_count_r'].fillna(0)
+        filtered_nucleus_df.drop(['foci_count_r'], axis=1, inplace=True)
+    else:
+        filtered_nucleus_df = nucleus_df.copy()
 
-    # Apply min/max area and solidity filters to the nucleus data and save final results
-    filtered_nucleus_df = filtered_nucleus_df[(filtered_nucleus_df['nucleus_area'] > nucleus_min_area) &
-                                              (filtered_nucleus_df['nucleus_area'] < nucleus_max_area) &
-                                              (filtered_nucleus_df['nucleus_solidity'] > nucleus_min_solidity)]
-    filtered_nucleus_df.to_csv(filename, sep='\t', index=False)
+    if len(filtered_nucleus_df) > 0:
+        # Apply min/max area and solidity filters to the nucleus data and save final results
+        filtered_nucleus_df = filtered_nucleus_df[(filtered_nucleus_df['nucleus_area'] > nucleus_min_area) &
+                                                  (filtered_nucleus_df['nucleus_area'] < nucleus_max_area) &
+                                                  (filtered_nucleus_df['nucleus_solidity'] > nucleus_min_solidity)]
+        filtered_nucleus_df.to_csv(filename, sep='\t', index=False)
 
 
 def count_foci():
@@ -469,15 +520,22 @@ def count_foci():
 
         # Save full data frames, including all nuclei and all foci data (no filtering)
         if len(foci_df) > 0:
-
             foci_df.to_csv(os.path.join(Output_Directory, "foci_data.txt"),
                            sep='\t',
                            index=False)
+            save_foci_props(foci_df,
+                            os.path.join(Output_Directory, "Foci_properties.png"),
+                            Foci_max_area)
 
         if len(nucleus_df) > 0:
             nucleus_df.to_csv(os.path.join(Output_Directory, "nucleus_data.txt"),
                               sep='\t',
                               index=False)
+            save_nuclei_props(nucleus_df,
+                              os.path.join(Output_Directory, "Nucleus_properties.png"),
+                              Nucleus_min_area,
+                              Nucleus_max_area,
+                              Nucleus_min_solidity)
 
         # Apply filters, save final results
         if len(foci_df) > 0 or len(nucleus_df) > 0:
@@ -488,16 +546,6 @@ def count_foci():
                           Nucleus_min_area,
                           Nucleus_max_area,
                           Nucleus_min_solidity)
-
-            # Save foci and nuclei props as histograms and scatter plots
-            save_foci_props(foci_df,
-                            os.path.join(Output_Directory, "Foci_properties.png"),
-                            Foci_max_area)
-            save_nuclei_props(nucleus_df,
-                              os.path.join(Output_Directory, "Nucleus_properties.png"),
-                              Nucleus_min_area,
-                              Nucleus_max_area,
-                              Nucleus_min_solidity)
 
         # Inform user of results
         msg_box = QMessageBox()
