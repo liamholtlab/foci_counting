@@ -102,8 +102,17 @@ def process_files(input_dir,
         else:
             # TIF file is a z-projection of a single FOV
             images = io.imread(img_file)
-            # print(images.max())
+
+            maxch = 10
+            if len(images.shape) == 3 and images.shape[0] > maxch > images.shape[2]:
+                print("Notice: shape of input seems to be (y, x, c): reshaping to (c, y, x)")
+                levels = []
+                for level in range(images.shape[2]):
+                    levels.append(images[:, :, level])
+                images = np.stack(levels)
+
             n_fov = 1
+
         print("n_fov:", n_fov)
         for i in range(n_fov):
             if file_type == 'nd2':
