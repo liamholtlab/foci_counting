@@ -10,11 +10,13 @@ from helpers import (
     segment_nuclei_th,
     segment_nuclei_stardist,
     threshold_methods,
+    vol_threshold_methods,
     segmentation_methods,
     save_foci_props,
     save_nuclei_props,
     load_settings,
-    save_settings
+    save_settings,
+    measure_volume
 )
 from skimage import (
     io,
@@ -32,7 +34,7 @@ import pandas as pd
 import glob
 import os
 import traceback
-
+from tifffile import imread, imwrite, TiffFile
 
 settings_file = "foci_counting.pkl"
 
@@ -53,7 +55,15 @@ def process_files(input_dir,
                   th_method="FoCo",
                   foco_sm_r=0,
                   foco_bk_r=0,
-                  int_cutoff=0.5):
+                  int_cutoff=0.5,
+                  volume_th_method='yen',
+                  z_microns_per_voxel=0.5,
+                  xy_microns_per_voxel=0.1342,
+                  home_z_level=6,
+                  expand_roi_px=5,
+                  min_z_level=1,
+                  max_z_level=11,
+                  max_px_valid=10):
 
     # label all foci with area greater than 100px, for helping estimate size cutoff
     foci_min_area_for_label = 100
@@ -69,7 +79,7 @@ def process_files(input_dir,
         sd_model = StarDist2D.from_pretrained('2D_versatile_fluo')
 
     # create the directories in the output for saving the check images
-    for dir_ in ["segmentation", "foci"]:
+    for dir_ in ["segmentation", "foci", "volume"]:
         dir_ = os.path.join(output_dir, dir_)
         if not os.path.exists(dir_):
             os.mkdir(dir_)
@@ -96,32 +106,60 @@ def process_files(input_dir,
         if file_type == 'nd2':
             images = ND2Reader(img_file)
             print(images.sizes)
-            images.bundle_axes = 'vczyx'
-            images = images[0]  # ND2Reader adds an extra dimension to the beginning
-            n_fov = len(images)
+
+            if 'z' in images.sizes:
+                z_levels = True
+                bundle = 'czyx'
+            else:
+                z_levels = False
+                bundle = 'cyx'
+
+            if 'v' in images.sizes:
+                n_fov = images.sizes['v']
+                bundle = 'v' + bundle
+            else:
+                n_fov = 1
+
+            if not ('c' in images.sizes and 'y' in images.sizes and 'x' in images.sizes):
+                print(f"Error: unexpected shape of input image: {images.sizes}")
+                continue
+
+            images.bundle_axes = bundle
+            images = images[0]  # ND2Reader adds an extra dimension to the beginning with bundle_axes
+
         else:
-            # TIF file is a z-projection of a single FOV
-            images = io.imread(img_file)
-
-            maxch = 10
-            if len(images.shape) == 3 and images.shape[0] > maxch > images.shape[2]:
-                print("Notice: shape of input seems to be (y, x, c): reshaping to (c, y, x)")
-                levels = []
-                for level in range(images.shape[2]):
-                    levels.append(images[:, :, level])
-                images = np.stack(levels)
-
+            images = imread(img_file)  # io.imread(img_file)
             n_fov = 1
+
+            # Sort out if the z or the color is first, we want color first
+            tif_ = TiffFile(img_file)
+            num_color_ch = tif_.imagej_metadata['channels']
+
+            if len(images.shape) == 4:
+                z_levels = True
+                num_z_levels = tif_.imagej_metadata['slices']
+
+                if images.shape[0] == num_z_levels and images.shape[1] == num_color_ch:
+                    images = images.transpose(1, 0, 2, 3)
+
+            elif len(images.shape) == 3:
+                z_levels = False
+
+                if images.shape[0] > num_color_ch and images.shape[2] == num_color_ch:
+                    images = images.transpose(2, 0, 1)
+            else:
+                print(f"Error: unexpected shape of input image: {images.shape}")
+                continue
 
         print("n_fov:", n_fov)
         for i in range(n_fov):
-            if file_type == 'nd2':
+            if n_fov > 1:
                 fov = images[i]
             else:
                 fov = images
 
             # z-project the dapi channel
-            if file_type == 'nd2':
+            if z_levels:
                 dapi_img_stack = fov[nucleus_ch]
                 dapi_img = np.max(dapi_img_stack, axis=0)
             else:
@@ -147,9 +185,20 @@ def process_files(input_dir,
             # save the image overlay for checking segmentation results
             plt.imsave(os.path.join(output_dir, "segmentation", f"{file_root}_v{i}.png"), nucleus_img_overlay)
 
+            if z_levels:
+                # Measure the volume using nuclei channel and the MASK from segmentation
+                df_volume, volume_overlay_stack = measure_volume(dapi_img_stack, labeled_nuclei, volume_th_method,
+                                                                 z_microns_per_voxel, xy_microns_per_voxel,
+                                                                 home_z_level, expand_roi_px,
+                                                                 min_z_level, max_z_level, max_px_valid)
+                df = df.join(df_volume.set_index('label'), on='label', how='left')
+
+                # save the image overlay stack for checking segmentation results at each z level
+                io.imsave(os.path.join(output_dir, "volume", f"{file_root}_v{i}.tif"), volume_overlay_stack)
+
             # z-project the intensity channel
             if intensity_ch >= 0:
-                if file_type == 'nd2':
+                if z_levels:
                     int_img_stack = fov[intensity_ch]
                     int_img = np.mean(int_img_stack, axis=0)
                 else:
@@ -170,13 +219,12 @@ def process_files(input_dir,
                 df[f'background_intensity_ch{intensity_ch + 1}'] = mean_bk
                 df[f'CTCF_ch{intensity_ch + 1}'] = df['area'] * (
                         df[f'mean_intensity_ch{intensity_ch + 1}'] - df[f'background_intensity_ch{intensity_ch + 1}'])
-
             else:
                 int_img = None
 
             # z-project the foci channel (max project and avg project)
             if foci_ch >= 0:
-                if file_type == 'nd2':
+                if z_levels:
                     h2ax_img_stack = fov[foci_ch]
                     h2ax_img = np.max(h2ax_img_stack, axis=0)
                     h2ax_img_avgpr = np.mean(h2ax_img_stack, axis=0)
@@ -201,7 +249,6 @@ def process_files(input_dir,
                         df[f'mean_intensity_ch{foci_ch+1} (foci)'] - df[f'background_intensity_ch{foci_ch+1} (foci)'])
 
                 # identify H2AX foci
-
                 # Max of the image - check bit depth
                 img_max = np.max(h2ax_img)
                 if img_max > 2 ** bit_depth - 1:
@@ -347,6 +394,18 @@ def process_files(input_dir,
     #Smoothing_radius={"min": 1, "max": 10},
     #Closing_radius={"min": 1, "max": 10},
     #WS_seed_distance={"label": "WS seed distance", "min": 1, "max": 1000},
+    Volume_Threshold_Method={
+        "widget_type": "RadioButtons",
+        "orientation": "horizontal",
+        "choices": vol_threshold_methods,
+    },
+    Z_microns_per_voxel={"min": 0.01, "step": 0.01},
+    XY_microns_per_voxel={"min": 0.0001, "step": 0.0001},
+    Home_z_level={"min": 1, "step": 1},
+    Expand_ROI_px={"min": 0, "step": 1},
+    Min_z_level={"min": 0, "step": 1},
+    Max_z_level={"min": 0, "step": 1},
+    Max_px_valid={"min": 0, "step": 1},
     Foci_Threshold_Method={
         "widget_type": "RadioButtons",
         "orientation": "horizontal",
@@ -375,6 +434,14 @@ def count_foci_widget(
     #Smoothing_radius=4,
     #Closing_radius=2,
     #WS_seed_distance=35,
+    Volume_Threshold_Method='otsu',
+    Z_microns_per_voxel=0.5,
+    XY_microns_per_voxel=0.1342,
+    Home_z_level=6,
+    Expand_ROI_px=5,
+    Min_z_level=1,
+    Max_z_level=11,
+    Max_px_valid=10,
     Intensity_channel=3,
     Foci_Channel=4,
     Foci_Threshold_Method="FoCo",
@@ -490,6 +557,14 @@ def count_foci():
         File_type = count_foci_widget.File_type.value
         #Segmentation_method = count_foci_widget.Segmentation_method.value
         StarDist_Rescale_factor = count_foci_widget.StarDist_Rescale_factor.value
+        Volume_Threshold_Method = count_foci_widget.Volume_Threshold_Method.value
+        Z_microns_per_voxel = count_foci_widget.Z_microns_per_voxel.value
+        XY_microns_per_voxel = count_foci_widget.XY_microns_per_voxel.value
+        Home_z_level = count_foci_widget.Home_z_level.value
+        Expand_ROI_px = count_foci_widget.Expand_ROI_px.value
+        Min_z_level = count_foci_widget.Min_z_level.value
+        Max_z_level = count_foci_widget.Max_z_level.value
+        Max_px_valid = count_foci_widget.Max_px_valid.value
 
         # Save parameter settings to file
         save_settings(settings_file, count_foci_widget)
@@ -508,6 +583,9 @@ def count_foci():
         Intensity_channel = Intensity_channel-1
         Nucleus_Channel = Nucleus_Channel-1
         Foci_Channel = Foci_Channel-1
+        Home_z_level = Home_z_level-1
+        Min_z_level = Min_z_level-1
+        Max_z_level = Max_z_level-1
 
         nucleus_df, foci_df, msg = process_files(input_dir=Input_Directory,
                                                  output_dir=Output_Directory,
@@ -525,7 +603,15 @@ def count_foci():
                                                  th_method=Threshold_Method,
                                                  foco_sm_r=Foco_sm_size,
                                                  foco_bk_r=Foco_bk_radius,
-                                                 int_cutoff=Intensity_cutoff)
+                                                 int_cutoff=Intensity_cutoff,
+                                                 volume_th_method=Volume_Threshold_Method,
+                                                 z_microns_per_voxel=Z_microns_per_voxel,
+                                                 xy_microns_per_voxel=XY_microns_per_voxel,
+                                                 home_z_level=Home_z_level,
+                                                 expand_roi_px=Expand_ROI_px,
+                                                 min_z_level=Min_z_level,
+                                                 max_z_level=Max_z_level,
+                                                 max_px_valid=Max_px_valid)
 
         # Save full data frames, including all nuclei and all foci data (no filtering)
         if len(foci_df) > 0:
@@ -600,5 +686,13 @@ if __name__ == "__main__":
     #w.Smoothing_radius.width = 100
     #w.Closing_radius.width = 100
     #w.WS_seed_distance.width = 100
+    w.StarDist_Rescale_factor.width = 100
+    w.Z_microns_per_voxel.width = 100
+    w.XY_microns_per_voxel.width = 100
+    w.Home_z_level.width = 100
+    w.Expand_ROI_px.width = 100
+    w.Min_z_level.width = 100
+    w.Max_z_level.width = 100
+    w.Max_px_valid.width = 100
 
     app.exec_()

@@ -17,7 +17,82 @@ import pickle
 from csbdeep.utils import normalize
 
 threshold_methods = ["FoCo", "minimum", "yen"]
+vol_threshold_methods = ["otsu", "yen", "minimum"]
 segmentation_methods = ['StarDist', 'Threshold']
+
+
+def measure_volume(img_stack, labeled_nuclei, threshold_method,
+                   z_microns_per_voxel, xy_microns_per_voxel,
+                   home_z_level, expand_roi_px,
+                   min_z_level, max_z_level, max_px_valid):
+
+    # Expand each ROI by 5 pixels all around
+    mask = morphology.dilation(labeled_nuclei, morphology.disk(expand_roi_px))
+    props = measure.regionprops(mask)
+
+    # sets the threshold based on the "home" and use this for every z level at every ROI
+    threshold = eval('filters.threshold_' + threshold_method + '(img_stack[home_z_level])')
+    # threshold = filters.threshold_yen(img_stack[home_z_level])
+
+    # Prepare check image labels
+    labels_arr = []
+    for z_level in range(0, len(img_stack)):
+        labels_arr.append(np.zeros(img_stack[z_level].shape, dtype='uint16'))
+
+    # for each ROI:
+    volume_data = []
+    for prop in props:
+        # get the bounding box for each ROI, from the labeled mask
+        (min_row, min_col, max_row, max_col) = prop['bbox']
+
+        # get binary region image same size as bbox
+        roi_binary_image = prop['image']
+
+        valid_roi = True
+        volume_microns = 0
+        volume_pixels = 0
+
+        # for each z-level:
+        for z_level in range(0, len(img_stack)):
+            img_z = img_stack[z_level]
+
+            # have a bounding box from the ROI at each z-level in the stack
+            roi_bbox = img_z[min_row:max_row, min_col:max_col]
+
+            # apply the threshold
+            roi_bbox_mask = roi_bbox > threshold
+            roi_bbox_mask = ndimage.binary_fill_holes(roi_bbox_mask)
+
+            # remove pixels outside the exact ROI
+            roi_bbox_mask = roi_bbox_mask * roi_binary_image
+
+            area_px = len(roi_bbox_mask[roi_bbox_mask])
+
+            # cells that are too high or low in the plane are marked as invalid
+            if (z_level < min_z_level or z_level > max_z_level) and area_px > max_px_valid:
+                valid_roi = False
+
+            volume_microns += area_px * xy_microns_per_voxel * z_microns_per_voxel
+            volume_pixels += area_px
+
+            # add nucleus label on label image for this z level
+            labels_arr[z_level][min_row:max_row, min_col:max_col] = roi_bbox_mask * prop['label']
+
+        volume_data.append([prop['label'], volume_pixels, volume_microns, valid_roi])
+
+    # SAVE IMAGE FOR CHECKING
+    img_overlay_arr = []
+    for z_level in range(0, len(img_stack)):
+        img_uint8 = exposure.rescale_intensity(img_stack[z_level], out_range=(0, 255)).astype('uint8')
+        image_label_overlay = segmentation.mark_boundaries(img_uint8,
+                                                           labels_arr[z_level],
+                                                           color=[0, 1, 0],
+                                                           mode='inner')
+        img_overlay_arr.append(image_label_overlay)
+    img_overlay_stack = np.stack(img_overlay_arr, axis=0)
+    volume_data = pd.DataFrame(volume_data, columns=['label', 'volume_px', 'volume_microns', 'volume_valid_roi'])
+
+    return volume_data, img_overlay_stack
 
 
 def load_settings(filename, main_widget):
