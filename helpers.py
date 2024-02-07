@@ -78,7 +78,10 @@ def measure_volume(img_stack, labeled_nuclei, threshold_method,
             # add nucleus label on label image for this z level
             labels_arr[z_level][min_row:max_row, min_col:max_col] = roi_bbox_mask * prop['label']
 
-        volume_data.append([prop['label'], volume_pixels, volume_microns, valid_roi])
+        volume_data.append([prop['label'], prop['centroid'][0], prop['centroid'][1], volume_pixels, volume_microns, valid_roi])
+
+    volume_data = pd.DataFrame(volume_data, columns=['label', 'centroid-0', 'centroid-1',
+                                                     'volume_px', 'volume_microns', 'volume_valid_roi'])
 
     # SAVE IMAGE FOR CHECKING
     img_overlay_arr = []
@@ -88,10 +91,17 @@ def measure_volume(img_stack, labeled_nuclei, threshold_method,
                                                            labels_arr[z_level],
                                                            color=[0, 1, 0],
                                                            mode='inner')
+        for row in volume_data.iterrows():
+            label_ = f"{row[1]['label']} {round(row[1]['volume_microns'], 2)} um3"
+            draw_label_on_image(image_label_overlay,
+                                int(row[1]['centroid-0']),
+                                int(row[1]['centroid-1']),
+                                label_,
+                                text_color=[1, 1, 1])
         img_overlay_arr.append(image_label_overlay)
     img_overlay_stack = np.stack(img_overlay_arr, axis=0)
-    volume_data = pd.DataFrame(volume_data, columns=['label', 'volume_px', 'volume_microns', 'volume_valid_roi'])
 
+    volume_data.drop(columns=['centroid-0', 'centroid-1'], inplace=True)
     return volume_data, img_overlay_stack
 
 
