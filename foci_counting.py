@@ -7,6 +7,7 @@ from helpers import (
     IJ_threshold_minimum,
     foci_thresh,
     draw_label_on_image,
+    measure_nuclei_from_mask,
     segment_nuclei_th,
     segment_nuclei_stardist,
     threshold_methods,
@@ -89,8 +90,12 @@ def process_files(input_dir,
     foci_data = pd.DataFrame()
     nucleus_data = pd.DataFrame()
 
-    # Read in nd2 files from input directory
+    # Read in nd2 or tif files from input directory
     img_files = glob.glob(os.path.join(input_dir, f"*.{file_type}"))
+
+    if segmentation_method == 'LabeledMask' and file_type == 'tif':
+        # remove any files that end in _mask.tif from the list
+        img_files = [f for f in img_files if not f.endswith("_mask.tif")]
 
     if len(img_files) == 0:
         # Commonly, this happens when the user enters a mistake in the path
@@ -152,6 +157,15 @@ def process_files(input_dir,
                 continue
 
         print("n_fov:", n_fov)
+
+        mask_file = ""
+        if segmentation_method == 'LabeledMask':
+            if n_fov > 1:
+                print(f"Error: LabeledMask method only works with single FOV images, using 'StarDist'.")
+                segmentation_method = 'StarDist'
+            else:
+                mask_file = os.path.join(input_dir, f"{file_root}_mask.tif")
+
         for i in range(n_fov):
             if n_fov > 1:
                 fov = images[i]
@@ -177,6 +191,9 @@ def process_files(input_dir,
                 df, labeled_nuclei, nucleus_img_overlay = segment_nuclei_stardist(dapi_img,
                                                                                   sd_model,
                                                                                   rescale_factor)
+            elif segmentation_method == 'LabeledMask':
+                labeled_nuclei = imread(mask_file)
+                df, image_label_overlay = measure_nuclei_from_mask(dapi_img, labeled_nuclei)
             else:
                 print(f"Error: unknown threshold method {th_method}, using 'StarDist'")
                 df, labeled_nuclei, nucleus_img_overlay = segment_nuclei_stardist(dapi_img,
@@ -384,11 +401,11 @@ def process_files(input_dir,
     #     "orientation": "horizontal",
     #     "choices": ['vczyx', 'vcyx', 'czyx', 'cyx'],
     # },
-    #Segmentation_method={
-    #    "widget_type": "RadioButtons",
-    #    "orientation": "horizontal",
-    #    "choices": segmentation_methods,
-    #},
+    Segmentation_method={
+        "widget_type": "RadioButtons",
+        "orientation": "horizontal",
+        "choices": segmentation_methods,
+    },
     StarDist_Rescale_factor={"min": 0, "max": 1.0},
     #CE_pixel_saturation={"label": "CE px saturation (%)", "min": 0, "max": 100},
     #Smoothing_radius={"min": 1, "max": 10},
@@ -428,7 +445,7 @@ def count_foci_widget(
     File_type='nd2',
     #Stack_order='vczyx',
     Nucleus_Channel=2,
-    #Segmentation_method="StarDist",
+    Segmentation_method="StarDist",
     StarDist_Rescale_factor=0.5,
     #CE_pixel_saturation=6,
     #Smoothing_radius=4,
@@ -555,7 +572,7 @@ def count_foci():
         #Closing_radius = count_foci_widget.Closing_radius.value
         #WS_seed_distance = count_foci_widget.WS_seed_distance.value
         File_type = count_foci_widget.File_type.value
-        #Segmentation_method = count_foci_widget.Segmentation_method.value
+        Segmentation_method = count_foci_widget.Segmentation_method.value
         StarDist_Rescale_factor = count_foci_widget.StarDist_Rescale_factor.value
         Volume_Threshold_Method = count_foci_widget.Volume_Threshold_Method.value
         Z_microns_per_voxel = count_foci_widget.Z_microns_per_voxel.value
@@ -570,10 +587,8 @@ def count_foci():
         save_settings(settings_file, count_foci_widget)
 
         # Execute foci finding
-        # threshold method for segmentation no longer selected by user, always use StarDist
-        Segmentation_method = 'StarDist'
 
-        # parameters for thresholding method (not used if using StarDist)
+        # parameters for thresholding method of segmentation (placeholder, not used)
         CE_pixel_saturation = 6
         Smoothing_radius = 4
         Closing_radius = 2
