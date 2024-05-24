@@ -95,11 +95,11 @@ def process_files(input_dir,
     img_files = glob.glob(os.path.join(input_dir, f"*.{file_type}"))
 
     if file_type == 'tif':
-        # remove any files that end in _mask.tif from the list, case in sensitive
+        # remove any files that end in _mask.tif from the list, case in-sensitive
         img_files = [f for f in img_files if not f.lower().endswith("_mask.tif")]
 
     if len(img_files) == 0:
-        # Commonly, this happens when the user enters a mistake in the path
+        # Often, this happens when the user enters a mistake in the path
         return pd.DataFrame(), pd.DataFrame(), f"No {file_type} files found in the path: '{input_dir}'"
     else:
         file_count = len(img_files)
@@ -159,6 +159,7 @@ def process_files(input_dir,
 
         print("n_fov:", n_fov)
 
+        # Check if there is a mask file for the current image: this is only allowed for single FOV images
         mask_file = ""
         if segmentation_method == 'LabeledMask':
             if n_fov > 1:
@@ -169,9 +170,9 @@ def process_files(input_dir,
                 # If the mask directory is different from the input directory, also can be <filename>.tif
                 mask_files = (os.path.join(input_mask_dir, f"{file_root}_mask.tif"),
                               os.path.join(input_mask_dir, f"{file_root}_MASK.tif"))
-                if input_dir != input_mask_dir:
+                if file_type != 'tif' or not os.path.samefile(input_dir, input_mask_dir):
                     mask_files = mask_files + (os.path.join(input_mask_dir, f"{file_root}.tif"), )
-                mask_file = ""
+
                 for file_ in mask_files:
                     if os.path.exists(file_):
                         mask_file = file_
@@ -179,6 +180,8 @@ def process_files(input_dir,
                 if mask_file == "":
                     print(f"Error: No mask file found for {file_root}, using 'StarDist' for segmentation.")
                     segmentation_method = 'StarDist'
+                else:
+                    print(f"Using mask file: {mask_file}")
 
         for i in range(n_fov):
             if n_fov > 1:
@@ -207,7 +210,7 @@ def process_files(input_dir,
                                                                                   rescale_factor)
             elif segmentation_method == 'LabeledMask':
                 labeled_nuclei = imread(mask_file)
-                df, image_label_overlay = measure_nuclei_from_mask(dapi_img, labeled_nuclei)
+                df, nucleus_img_overlay = measure_nuclei_from_mask(dapi_img, labeled_nuclei)
             else:
                 print(f"Error: unknown threshold method {th_method}, using 'StarDist'")
                 df, labeled_nuclei, nucleus_img_overlay = segment_nuclei_stardist(dapi_img,
@@ -488,6 +491,9 @@ def count_foci_widget(
     try:
         print(f'Filtering data with new cutoffs.  Old (filtered) file will be overwritten.')
 
+        if Mask_directory_same_as_Input:
+            Input_Mask_Directory = Input_Directory
+
         # Save parameter settings to file
         save_settings(settings_file, count_foci_widget)
 
@@ -598,6 +604,9 @@ def count_foci():
         Max_z_level = count_foci_widget.z_level_range.value[1]
         Max_px_valid = count_foci_widget.Max_px_valid.value
 
+        if Mask_directory_same_as_Input:
+            Input_Mask_Directory = Input_Directory
+
         # Save parameter settings to file
         save_settings(settings_file, count_foci_widget)
 
@@ -616,9 +625,6 @@ def count_foci():
         Home_z_level = Home_z_level-1
         Min_z_level = Min_z_level-1
         Max_z_level = Max_z_level-1
-
-        if Mask_directory_same_as_Input:
-            Input_Mask_Directory = Input_Directory
 
         nucleus_df, foci_df, msg = process_files(input_dir=Input_Directory,
                                                  input_mask_dir=Input_Mask_Directory,
@@ -684,6 +690,7 @@ def count_foci():
 
     except Exception:
         error_message = traceback.format_exc()
+        print(error_message)
         msg_box = QMessageBox()
         msg_box.setIcon(QMessageBox.Critical)
         msg_box.setText("An error occurred")
