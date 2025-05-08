@@ -18,7 +18,7 @@ from csbdeep.utils import normalize
 
 threshold_methods = ["FoCo", "minimum", "yen"]
 vol_threshold_methods = ["otsu", "yen", "minimum"]
-segmentation_methods = ['StarDist', 'Threshold']
+segmentation_methods = ['StarDist', 'LabeledMask']  # 'Threshold']
 
 
 def measure_volume(img_stack, labeled_nuclei, threshold_method,
@@ -137,17 +137,11 @@ def save_settings(filename, main_widget):
         return False
 
 
-def segment_nuclei_stardist(img,
-                            model,
-                            scale_factor=0.5):
+def measure_nuclei_from_mask(img, labels):
+    # given an image and a labeled mask, this function will return
+    # a dataframe with the properties of each labeled region
+    # and an image with the labels overlayed on the original image
 
-    labels, _ = model.predict_instances(normalize(transform.rescale(img, scale_factor)))
-    labels = transform.resize(labels, img.shape, order=0, preserve_range=True)
-
-    # clear those touching border
-    labels = segmentation.clear_border(labels)
-
-    # df is a data frame of identified nuclei
     props = ['label', 'area', 'solidity', 'bbox', 'coords', 'centroid']
     df = pd.DataFrame(measure.regionprops_table(labels, properties=props))
 
@@ -165,6 +159,20 @@ def segment_nuclei_stardist(img,
                             label_,
                             text_color=[1, 1, 1])
 
+    return df, image_label_overlay
+
+
+def segment_nuclei_stardist(img,
+                            model,
+                            scale_factor=0.5):
+
+    labels, _ = model.predict_instances(normalize(transform.rescale(img, scale_factor)))
+    labels = transform.resize(labels, img.shape, order=0, preserve_range=True)
+
+    # clear those touching border
+    labels = segmentation.clear_border(labels)
+
+    df, image_label_overlay = measure_nuclei_from_mask(img, labels)
     return df, labels, image_label_overlay
 
 
@@ -217,24 +225,7 @@ def segment_nuclei_th(img,
     # remove small objects
     labels = morphology.remove_small_objects(labels)
 
-    # df is a data frame of identified nuclei
-    props = ['label', 'area', 'solidity', 'bbox', 'coords', 'centroid']
-    df = pd.DataFrame(measure.regionprops_table(labels, properties=props))
-
-    # SAVE IMAGE FOR CHECKING - overlap nucleus area/solidity for each
-    img_uint8 = exposure.rescale_intensity(img, out_range=(0, 255)).astype('uint8')
-    image_label_overlay = segmentation.mark_boundaries(img_uint8,
-                                                       labels,
-                                                       color=[0, 1, 0],
-                                                       mode='inner')
-    for row in df.iterrows():
-        label_ = f"{row[1]['label']}: {round(row[1]['area'], 0)}|{round(row[1]['solidity'], 2)}"
-        draw_label_on_image(image_label_overlay,
-                            int(row[1]['centroid-0']),
-                            int(row[1]['centroid-1']),
-                            label_,
-                            text_color=[1, 1, 1])
-
+    df, image_label_overlay = measure_nuclei_from_mask(img, labels)
     return df, labels, image_label_overlay
 
 

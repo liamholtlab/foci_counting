@@ -2,11 +2,11 @@ from PySide2.QtWidgets import QApplication
 from pathlib import Path
 from magicgui import magicgui
 from PySide2.QtWidgets import QMessageBox
-from stardist.models import StarDist2D
 from helpers import (
     IJ_threshold_minimum,
     foci_thresh,
     draw_label_on_image,
+    measure_nuclei_from_mask,
     segment_nuclei_th,
     segment_nuclei_stardist,
     threshold_methods,
@@ -40,6 +40,7 @@ settings_file = "foci_counting.pkl"
 
 
 def process_files(input_dir,
+                  input_mask_dir,
                   output_dir,
                   nucleus_ch=1,
                   foci_ch=3,
@@ -75,7 +76,8 @@ def process_files(input_dir,
     type_map = {8: 'uint8', 12: 'uint16', 16: 'uint16', 32: 'uint32'}
 
     # StarDist Model, if using...
-    if segmentation_method != 'Thresholding':
+    if segmentation_method == 'StarDist':
+        from stardist.models import StarDist2D
         sd_model = StarDist2D.from_pretrained('2D_versatile_fluo')
 
     # create the directories in the output for saving the check images
@@ -89,11 +91,15 @@ def process_files(input_dir,
     foci_data = pd.DataFrame()
     nucleus_data = pd.DataFrame()
 
-    # Read in nd2 files from input directory
+    # Read in nd2 or tif files from input directory
     img_files = glob.glob(os.path.join(input_dir, f"*.{file_type}"))
 
+    if file_type == 'tif':
+        # remove any files that end in _mask.tif from the list, case in-sensitive
+        img_files = [f for f in img_files if not f.lower().endswith("_mask.tif")]
+
     if len(img_files) == 0:
-        # Commonly, this happens when the user enters a mistake in the path
+        # Often, this happens when the user enters a mistake in the path
         return pd.DataFrame(), pd.DataFrame(), f"No {file_type} files found in the path: '{input_dir}'"
     else:
         file_count = len(img_files)
@@ -152,6 +158,31 @@ def process_files(input_dir,
                 continue
 
         print("n_fov:", n_fov)
+
+        # Check if there is a mask file for the current image: this is only allowed for single FOV images
+        mask_file = ""
+        if segmentation_method == 'LabeledMask':
+            if n_fov > 1:
+                print(f"Error: LabeledMask method only works with single FOV images, using 'StarDist' for segmentation.")
+                segmentation_method = 'StarDist'
+            else:
+                # select the mask file that matches the current image file: <filename>_mask.tif or <filename>_MASK.tif
+                # If the mask directory is different from the input directory, also can be <filename>.tif
+                mask_files = (os.path.join(input_mask_dir, f"{file_root}_mask.tif"),
+                              os.path.join(input_mask_dir, f"{file_root}_MASK.tif"))
+                if file_type != 'tif' or not os.path.samefile(input_dir, input_mask_dir):
+                    mask_files = mask_files + (os.path.join(input_mask_dir, f"{file_root}.tif"), )
+
+                for file_ in mask_files:
+                    if os.path.exists(file_):
+                        mask_file = file_
+                        break
+                if mask_file == "":
+                    print(f"Error: No mask file found for {file_root}, using 'StarDist' for segmentation.")
+                    segmentation_method = 'StarDist'
+                else:
+                    print(f"Using mask file: {mask_file}")
+
         for i in range(n_fov):
             if n_fov > 1:
                 fov = images[i]
@@ -177,6 +208,9 @@ def process_files(input_dir,
                 df, labeled_nuclei, nucleus_img_overlay = segment_nuclei_stardist(dapi_img,
                                                                                   sd_model,
                                                                                   rescale_factor)
+            elif segmentation_method == 'LabeledMask':
+                labeled_nuclei = imread(mask_file)
+                df, nucleus_img_overlay = measure_nuclei_from_mask(dapi_img, labeled_nuclei)
             else:
                 print(f"Error: unknown threshold method {th_method}, using 'StarDist'")
                 df, labeled_nuclei, nucleus_img_overlay = segment_nuclei_stardist(dapi_img,
@@ -367,7 +401,8 @@ def process_files(input_dir,
 
 
 @magicgui(
-    Input_Directory={"label": "Input directory (nd2)", "mode": "d"},
+    Input_Directory={"label": "Input directory (nd2/tif)", "mode": "d"},
+    Input_Mask_Directory={"label": "Nuclei mask directory (tif)", "mode": "d"},
     Output_Directory={"label": "Output directory", "mode": "d"},
     Bit_depth={
         "widget_type": "RadioButtons",
@@ -384,11 +419,11 @@ def process_files(input_dir,
     #     "orientation": "horizontal",
     #     "choices": ['vczyx', 'vcyx', 'czyx', 'cyx'],
     # },
-    #Segmentation_method={
-    #    "widget_type": "RadioButtons",
-    #    "orientation": "horizontal",
-    #    "choices": segmentation_methods,
-    #},
+    Segmentation_method={
+        "widget_type": "RadioButtons",
+        "orientation": "horizontal",
+        "choices": segmentation_methods,
+    },
     StarDist_Rescale_factor={"min": 0, "max": 1.0},
     #CE_pixel_saturation={"label": "CE px saturation (%)", "min": 0, "max": 100},
     #Smoothing_radius={"min": 1, "max": 10},
@@ -402,9 +437,8 @@ def process_files(input_dir,
     Z_microns_per_voxel={"min": 0.01, "step": 0.01},
     XY_microns_per_voxel={"min": 0.0001, "step": 0.0001},
     Home_z_level={"min": 1, "step": 1},
+    z_level_range={"label": "Z levels min/max"},
     Expand_ROI_px={"min": 0, "step": 1},
-    Min_z_level={"min": 0, "step": 1},
-    Max_z_level={"min": 0, "step": 1},
     Max_px_valid={"min": 0, "step": 1},
     Foci_Threshold_Method={
         "widget_type": "RadioButtons",
@@ -414,8 +448,7 @@ def process_files(input_dir,
     Foco_sm_size={"label": "AdpM filter size (FoCo)", "min": 0, "max": 100},
     Foco_bk_radius={"label": "Opening radius (FoCo)", "min": 0, "max": 100},
     Intensity_cutoff={"label": "Intensity cutoff (FoCo)", "min": 0, "max": 1.0},
-    Nucleus_min_area={"label": "Nucl min area (px)", "min": 0, "max": 1000000},
-    Nucleus_max_area={"label": "Nucl max area (px)", "min": 0, "max": 1000000},
+    Nucleus_area_range={"label": "Nucleus area min/max (px)"},
     Nucleus_min_solidity={"min": 0, "max": 1.0},
     Foci_max_area={"label": "Foci max area (px)", "min": 0, "max": 1000000},
     Count_Foci={"widget_type": "PushButton"},
@@ -423,12 +456,14 @@ def process_files(input_dir,
 )
 def count_foci_widget(
     Input_Directory=Path("."),
+    Mask_directory_same_as_Input=True,
+    Input_Mask_Directory=Path("."),
     Output_Directory=Path("."),
     Bit_depth=12,
     File_type='nd2',
     #Stack_order='vczyx',
     Nucleus_Channel=2,
-    #Segmentation_method="StarDist",
+    Segmentation_method="StarDist",
     StarDist_Rescale_factor=0.5,
     #CE_pixel_saturation=6,
     #Smoothing_radius=4,
@@ -438,9 +473,8 @@ def count_foci_widget(
     Z_microns_per_voxel=0.5,
     XY_microns_per_voxel=0.1342,
     Home_z_level=6,
+    z_level_range=(1, 11),
     Expand_ROI_px=5,
-    Min_z_level=1,
-    Max_z_level=11,
     Max_px_valid=10,
     Intensity_channel=3,
     Foci_Channel=4,
@@ -449,14 +483,16 @@ def count_foci_widget(
     Foco_bk_radius=0,
     Intensity_cutoff=0.5,
     Foci_max_area=250,
-    Nucleus_min_area=1600,
-    Nucleus_max_area=8000,
+    Nucleus_area_range=(1500, 10000),
     Nucleus_min_solidity=0.92,
     Count_Foci=True
     # *NOTE* channel numbers are 1-based, and Intensity_channel set to 0 means no intensity channel measurement
 ):
     try:
         print(f'Filtering data with new cutoffs.  Old (filtered) file will be overwritten.')
+
+        if Mask_directory_same_as_Input:
+            Input_Mask_Directory = Input_Directory
 
         # Save parameter settings to file
         save_settings(settings_file, count_foci_widget)
@@ -477,8 +513,8 @@ def count_foci_widget(
                       nucleus_df,
                       os.path.join(Output_Directory, "final_results.txt"),
                       Foci_max_area,
-                      Nucleus_min_area,
-                      Nucleus_max_area,
+                      Nucleus_area_range[0],
+                      Nucleus_area_range[1],
                       Nucleus_min_solidity)
 
         # Save foci and nuclei props as histograms and scatter plots
@@ -489,8 +525,8 @@ def count_foci_widget(
         if len(nucleus_df) > 0:
             save_nuclei_props(nucleus_df,
                               os.path.join(Output_Directory, "Nucleus_properties.png"),
-                              Nucleus_min_area,
-                              Nucleus_max_area,
+                              Nucleus_area_range[0],
+                              Nucleus_area_range[1],
                               Nucleus_min_solidity)
 
     except Exception:
@@ -537,6 +573,8 @@ def count_foci():
     try:
         # Load params
         Input_Directory = count_foci_widget.Input_Directory.value
+        Mask_directory_same_as_Input = count_foci_widget.Mask_directory_same_as_Input.value
+        Input_Mask_Directory = count_foci_widget.Input_Mask_Directory.value
         Output_Directory = count_foci_widget.Output_Directory.value
         Nucleus_Channel = count_foci_widget.Nucleus_Channel.value
         Foci_Channel = count_foci_widget.Foci_Channel.value
@@ -546,8 +584,8 @@ def count_foci():
         Foco_sm_size = count_foci_widget.Foco_sm_size.value
         Foco_bk_radius = count_foci_widget.Foco_bk_radius.value
         Intensity_cutoff = count_foci_widget.Intensity_cutoff.value
-        Nucleus_min_area = count_foci_widget.Nucleus_min_area.value
-        Nucleus_max_area = count_foci_widget.Nucleus_max_area.value
+        Nucleus_min_area = count_foci_widget.Nucleus_area_range.value[0]
+        Nucleus_max_area = count_foci_widget.Nucleus_area_range.value[1]
         Nucleus_min_solidity = count_foci_widget.Nucleus_min_solidity.value
         Foci_max_area = count_foci_widget.Foci_max_area.value
         #CE_pixel_saturation = count_foci_widget.CE_pixel_saturation.value
@@ -555,25 +593,26 @@ def count_foci():
         #Closing_radius = count_foci_widget.Closing_radius.value
         #WS_seed_distance = count_foci_widget.WS_seed_distance.value
         File_type = count_foci_widget.File_type.value
-        #Segmentation_method = count_foci_widget.Segmentation_method.value
+        Segmentation_method = count_foci_widget.Segmentation_method.value
         StarDist_Rescale_factor = count_foci_widget.StarDist_Rescale_factor.value
         Volume_Threshold_Method = count_foci_widget.Volume_Threshold_Method.value
         Z_microns_per_voxel = count_foci_widget.Z_microns_per_voxel.value
         XY_microns_per_voxel = count_foci_widget.XY_microns_per_voxel.value
         Home_z_level = count_foci_widget.Home_z_level.value
         Expand_ROI_px = count_foci_widget.Expand_ROI_px.value
-        Min_z_level = count_foci_widget.Min_z_level.value
-        Max_z_level = count_foci_widget.Max_z_level.value
+        Min_z_level = count_foci_widget.z_level_range.value[0]
+        Max_z_level = count_foci_widget.z_level_range.value[1]
         Max_px_valid = count_foci_widget.Max_px_valid.value
+
+        if Mask_directory_same_as_Input:
+            Input_Mask_Directory = Input_Directory
 
         # Save parameter settings to file
         save_settings(settings_file, count_foci_widget)
 
         # Execute foci finding
-        # threshold method for segmentation no longer selected by user, always use StarDist
-        Segmentation_method = 'StarDist'
 
-        # parameters for thresholding method (not used if using StarDist)
+        # parameters for thresholding method of segmentation (placeholder, not used)
         CE_pixel_saturation = 6
         Smoothing_radius = 4
         Closing_radius = 2
@@ -588,6 +627,7 @@ def count_foci():
         Max_z_level = Max_z_level-1
 
         nucleus_df, foci_df, msg = process_files(input_dir=Input_Directory,
+                                                 input_mask_dir=Input_Mask_Directory,
                                                  output_dir=Output_Directory,
                                                  nucleus_ch=Nucleus_Channel,
                                                  foci_ch=Foci_Channel,
@@ -650,6 +690,7 @@ def count_foci():
 
     except Exception:
         error_message = traceback.format_exc()
+        print(error_message)
         msg_box = QMessageBox()
         msg_box.setIcon(QMessageBox.Critical)
         msg_box.setText("An error occurred")
@@ -678,8 +719,6 @@ if __name__ == "__main__":
     w.Intensity_cutoff.width = 100
     w.Foco_sm_size.width = 100
     w.Foco_bk_radius.width = 100
-    w.Nucleus_min_area.width = 100
-    w.Nucleus_max_area.width = 100
     w.Nucleus_min_solidity.width = 100
     w.Foci_max_area.width = 100
     #w.CE_pixel_saturation.width = 100
@@ -691,8 +730,16 @@ if __name__ == "__main__":
     w.XY_microns_per_voxel.width = 100
     w.Home_z_level.width = 100
     w.Expand_ROI_px.width = 100
-    w.Min_z_level.width = 100
-    w.Max_z_level.width = 100
     w.Max_px_valid.width = 100
+
+    w.z_level_range.value_0.width = 100
+    w.z_level_range.value_1.width = 100
+    w.Nucleus_area_range.value_0.width = 100
+    w.Nucleus_area_range.value_1.width = 100
+
+    w.Nucleus_area_range.value_0.max = 1000000
+    w.Nucleus_area_range.value_1.max = 1000000
+    w.Nucleus_area_range.value_0.step = 10
+    w.Nucleus_area_range.value_1.step = 10
 
     app.exec_()
